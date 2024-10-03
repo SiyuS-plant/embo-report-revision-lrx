@@ -1,0 +1,345 @@
+#################################
+Song et al. 2024 Embo Report
+
+
+################################Alpha diversity############################################
+
+# Load the required packages
+library(vegan)
+library(phyloseq)
+library(tidyverse)
+library(patchwork)
+library(agricolae)
+library(FSA)
+library(rcompanion)
+library(ggplot2)
+library(qiime2R)
+
+
+# Run this if you don't have these objects into your R environment
+data_otu <- read.table(file = "feature-table.csv", sep = ",", header = T, row.names = 1, 
+                       comment.char = "")
+data_grp <- read.table(file = "metadata.csv", sep = ",", header = T, row.names = 1)
+data_taxo <- read.csv("taxonomy.csv", header = TRUE, sep = ",", row.names = 1)
+
+
+# clean the taxonomy format
+tax <- data_taxo %>%
+  select(Taxon) %>% 
+  separate(Taxon, c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species"), "; ")
+
+tax.clean <- data.frame(row.names = row.names(tax),
+                        Kingdom = str_replace(tax[,1], "k__",""),
+                        Phylum = str_replace(tax[,2], "p__",""),
+                        Class = str_replace(tax[,3], "c__",""),
+                        Order = str_replace(tax[,4], "o__",""),
+                        Family = str_replace(tax[,5], "f__",""),
+                        Genus = str_replace(tax[,6], "g__",""),
+                        Species = str_replace(tax[,7], "s__",""),
+                        stringsAsFactors = FALSE)
+
+tax.clean[is.na(tax.clean)] <- ""
+tax.clean[tax.clean=="__"] <- ""
+
+for (i in 1:nrow(tax.clean)){
+  if (tax.clean[i,7] != ""){
+    tax.clean$Species[i] <- paste(tax.clean$Genus[i], tax.clean$Species[i], sep = " ")
+  } else if (tax.clean[i,2] == ""){
+    kingdom <- paste("Unclassified", tax.clean[i,1], sep = " ")
+    tax.clean[i, 2:7] <- kingdom
+  } else if (tax.clean[i,3] == ""){
+    phylum <- paste("Unclassified", tax.clean[i,2], sep = " ")
+    tax.clean[i, 3:7] <- phylum
+  } else if (tax.clean[i,4] == ""){
+    class <- paste("Unclassified", tax.clean[i,3], sep = " ")
+    tax.clean[i, 4:7] <- class
+  } else if (tax.clean[i,5] == ""){
+    order <- paste("Unclassified", tax.clean[i,4], sep = " ")
+    tax.clean[i, 5:7] <- order
+  } else if (tax.clean[i,6] == ""){
+    family <- paste("Unclassified", tax.clean[i,5], sep = " ")
+    tax.clean[i, 6:7] <- family
+  } else if (tax.clean[i,7] == ""){
+    tax.clean$Species[i] <- paste("Unclassified ",tax.clean$Genus[i], sep = " ")
+  }
+}
+
+TAX = tax_table(as.matrix(tax.clean))
+
+SAM = sample_data(data_grp, errorIfNULL = TRUE)
+OTU = otu_table(as.matrix(data_otu), taxa_are_rows = TRUE)              
+
+# Create the phyloseq object
+data_phylo <- phyloseq(OTU, TAX, SAM)
+
+
+set.seed(111) # keep result reproductive
+ps.rarefied = rarefy_even_depth(data_phylo, rngseed=1, sample.size=5123, replace=F)
+
+genotype_colors <- c("bulk soil" = "#b50000", "Col" = "#1c58aa", "fer" = "green4", "lrx" = "#ff8e59")
+
+p <- plot_richness(ps.rarefied, x="genotype", measures=c("Observed","Shannon")) +
+  geom_boxplot(aes(fill = plant), alpha = 0.8) +
+  theme(legend.position="none") +
+  ylim(0, NA) +
+  scale_fill_manual(values=genotype_colors) +
+  theme_q2r()
+
+
+rich = estimate_richness(ps.rarefied, measures = c("Observed", "Shannon", "Chao1", "InvSimpson"))
+wilcox.observed <- pairwise.wilcox.test(rich$Observed, 
+                                        sample_data(ps.rarefied)$genotype, 
+                                        p.adjust.method = "BH")
+tab.observed <- wilcox.observed$p.value %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column(var = "group1") %>%
+  gather(key="group2", value="p.adj", -group1) %>%
+  na.omit()
+tab.observed
+
+wilcox.shannon <- pairwise.wilcox.test(rich$Shannon, 
+                                       sample_data(ps.rarefied)$genotype, 
+                                       p.adjust.method = "BH")
+wilcox.shannon
+# Wilcoxon test for Chao1
+wilcox.chao1 <- pairwise.wilcox.test(rich$Chao1, 
+                                     sample_data(ps.rarefied)$genotype, 
+                                     p.adjust.method = "BH")
+
+# Transforming the p-values into a readable format for Chao1
+tab.chao1 <- wilcox.chao1$p.value %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column(var = "group1") %>%
+  gather(key="group2", value="p.adj", -group1) %>%
+  na.omit()
+
+# Display Chao1 results
+tab.chao1
+
+# Wilcoxon test for InvSimpson
+wilcox.invsimpson <- pairwise.wilcox.test(rich$InvSimpson, 
+                                          sample_data(ps.rarefied)$genotype, 
+                                          p.adjust.method = "BH")
+
+# Transforming the p-values into a readable format for InvSimpson
+tab.invsimpson <- wilcox.invsimpson$p.value %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column(var = "group1") %>%
+  gather(key="group2", value="p.adj", -group1) %>%
+  na.omit()
+
+# Display InvSimpson results
+tab.invsimpson
+tab.invsimpson$p.adj <- format(tab.invsimpson$p.adj, scientific = FALSE, nsmall = 5)
+tab.invsimpson
+
+
+
+
+################################Beta diversity############################################
+
+# Calculate weighted UniFrac distances
+weighted_unifrac_dist <- UniFrac(ps.rarefied, weighted = TRUE)
+# Perform PCoA based on weighted UniFrac distances
+pcoa_result <- ordinate(ps.rarefied, method = "PCoA", distance = weighted_unifrac_dist)
+
+genotype_colors <- c("bulk soil" = "#b50000", "Col" = "#1c58aa", "fer" = "green4", "lrx" = "#ff8e59")
+
+# Plot the PCoA results
+
+plot_ordination(ps.rarefied, pcoa_result, axes = c(1, 2), color = "plant") +
+  theme_classic() +
+  scale_color_manual(values=genotype_colors) + 
+  geom_point(aes(shape = phosphate), size=1.5, stroke = 1) +  # Define point shapes by phosphate
+  scale_shape_manual(values = c(1, 2)) +  # Define specific shapes
+  theme(strip.background = element_blank()) +
+  stat_ellipse(aes(group = genotype, linetype = phosphate), type = "norm", level = 0.5, alpha = 1, size = 0.6) +  # Different line types for phosphate
+  scale_linetype_manual(values = c("solid", "dashed"))  # Define solid and dashed lines
+
+# Perform PERMANOVA to test for group differences
+# Ensure you have the RVAideMemoire package installed
+if (!requireNamespace("RVAideMemoire", quietly = TRUE)) {
+  install.packages("RVAideMemoire")
+}
+library(RVAideMemoire)
+
+
+# Extract the sample names from the rarefied phyloseq object
+remaining_samples <- sample_names(ps.rarefied)
+
+# Subset the data_grp to include only remaining samples
+data_grp_updated <- data_grp[remaining_samples, ]
+
+# Number of samples in the updated grouping factor
+n_samples_updated <- length(remaining_samples)
+
+# Expected length of the distance matrix
+expected_length_updated <- n_samples_updated * (n_samples_updated - 1) / 2
+
+# Check if they match
+length(weighted_unifrac_dist) == expected_length_updated
+
+permanova_result <- adonis2(weighted_unifrac_dist ~ data_grp_updated$genotype, permutations = 999)
+permanova_result
+
+if (!requireNamespace("devtools", quietly = TRUE)) {
+  install.packages("devtools")
+}
+devtools::install_github("pmartinezarbizu/pairwiseAdonis/pairwiseAdonis")
+library(pairwiseAdonis)
+
+pairwise_results <- pairwise.adonis(weighted_unifrac_dist, data_grp_updated$genotype)
+
+pairwise_results
+
+
+
+
+
+
+################################DESeq2 Analysis############################################
+
+# order_actual_abundance.csv has the abundance data consolidated at the order level
+
+BiocManager::install("DESeq2")
+library(DESeq2)
+# Load your count data matrix (replace 'count_matrix.csv' with your file)
+count_matrix <- read.csv("order_actual_abundance.csv", row.names = 1)
+
+# Load your sample metadata (replace 'metadata_file.csv' with your file)
+sample_metadata <- read.csv("metadata.csv", row.names = 1)
+
+# Reorder colData based on the order of samples in countData
+sample_metadata <- sample_metadata[match(colnames(count_matrix), rownames(sample_metadata)), ]
+
+# Define the design formula (e.g., if you have multiple factors)
+design_formula <- ~ genotype
+
+
+# Create a DESeqDataSet object
+dds <- DESeqDataSetFromMatrix(countData = count_matrix, colData = sample_metadata, design = design_formula)
+# Filter out genes with zero counts in all samples
+dds <- dds[rowSums(counts(dds)) > 0, ]
+
+# Estimate size factors
+dds <- estimateSizeFactors(dds)
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+
+dds <- DESeq(dds)
+countsdds <- counts(dds, normalized = TRUE)
+write.csv(countsdds, file="dds_norm_countsns.csv")
+summary(dds)
+res1 <- results(dds, contrast=c("genotype", "bulk soil", "bulk soilHP"))
+res2 <- results(dds, contrast=c("genotype", "fer", "ferHP"))
+res3 <- results(dds, contrast=c("genotype", "lrx", "lrxHP"))
+res4 <- results(dds, contrast=c("genotype", "Col", "ColHP"))
+
+write.csv(res1, file="order_bulk-bulkHP.csv")
+write.csv(res2, file="order_fer-ferHP.csv")
+write.csv(res3, file="order_lrx-lrxHP.csv")
+write.csv(res4, file="order_Col-ColHP.csv")
+
+
+########################################Plot DESeq2 Results with Bubbleplot################################
+
+library(ggplot2)
+library(dplyr)
+
+filtered_df <- read.csv("order_Col-ColHP.csv") %>%
+  filter(pvalue < 0.1) %>%
+  filter(log2FoldChange < -0.8 | log2FoldChange > 0.8)
+
+sorted_df <- filtered_df %>%
+  arrange(log2FoldChange)
+
+sorted_df$X <- factor(sorted_df$X,
+                         levels=unique(sorted_df$X))
+
+da_taxa_plot <- ggplot(sorted_df, aes(x = log2FoldChange, y = X, size = -log10(pvalue))) +
+  geom_point(color = "#2166ac", alpha = ifelse(sorted_df$pvalue < 0.1, 1, 0.5)) +
+  geom_vline(xintercept = 0) +
+  geom_vline(xintercept = -0.5, linetype = "dashed", color = "deepskyblue4") +  # Vertical line at x = 1
+  geom_vline(xintercept = 0.5, linetype = "dashed", color = "tomato2") + 
+  theme(axis.title.y = element_blank()) 
+
+da_taxa_plot
+
+order_bulk_bulkHP <- read.csv("order_bulk-bulkHP.csv")
+order_lrx_lrxHP <- read.csv("order_lrx-lrxHP.csv")
+order_fer_ferHP <- read.csv("order_fer-ferHP.csv")
+
+# Filter the order_lrx_lrxHP data frame to include only matching rows
+filtered_order_bulk_bulkHP <- order_bulk_bulkHP %>%
+  filter(X %in% sorted_df$X)
+filtered_order_bulk_bulkHP$padj <- ifelse(is.na(filtered_order_bulk_bulkHP$padj), filtered_order_bulk_bulkHP$pvalue, filtered_order_bulk_bulkHP$padj)
+
+filtered_order_lrx_lrxHP <- order_lrx_lrxHP %>%
+  filter(X %in% sorted_df$X)
+filtered_order_lrx_lrxHP$padj <- ifelse(is.na(filtered_order_lrx_lrxHP$padj), filtered_order_lrx_lrxHP$pvalue, filtered_order_lrx_lrxHP$padj)
+
+filtered_order_fer_ferHP <- order_fer_ferHP %>%
+  filter(X %in% sorted_df$X)
+filtered_order_fer_ferHP$padj <- ifelse(is.na(filtered_order_fer_ferHP$padj), filtered_order_fer_ferHP$pvalue, filtered_order_fer_ferHP$padj)
+
+merged <- da_taxa_plot + 
+  geom_point(data = filtered_order_lrx_lrxHP, color = "#ff8e59") + 
+  geom_point(data = filtered_order_fer_ferHP, color = "green4") +
+  geom_point(data = filtered_order_bulk_bulkHP, color = "#b50000") 
+
+merged
+
+
+
+########################################Plot volcano plot based on ANCOM analysis from QIIME2################################
+
+install.packages("svglite")
+
+library(ggplot2)
+library(dplyr)
+library(svglite)
+
+# Read the data from the CSV file
+col.lrx.order <- read.csv("col_lrx_order.csv")
+
+# Check the first few rows of the data
+head(col.lrx.order)
+
+# Creating the volcano plot
+p1 <- ggplot(col.lrx.order, aes(x = -clr, y = W)) +
+  geom_point(shape = 21, color = "red3", fill = NA, size = 1.5, stroke = 0.7) +  # Adjust size and stroke as needed
+  theme_minimal() +
+  labs(title = "Volcano Plot", x = "clr", y = "W")
+
+col.lrx.class <- read.csv("col_lrx_class.csv")
+col.lrx.phylum <- read.csv("col_lrx_phylum.csv")
+
+mergedlrx <- p1 + 
+  geom_point(data = col.lrx.class, aes(x = clr, y = W), shape = 21, color = "#00a7a1", fill = NA, size = 1.5, stroke = 0.7) + 
+  geom_point(data = col.lrx.phylum, aes(x = clr, y = W), shape = 21, color = "#b0a60d", fill = NA, size = 1.5, stroke = 0.7)
+mergedlrx
+
+
+
+# Read the data from the CSV file
+col.fer.order <- read.csv("col_fer_order.csv")
+
+
+# Check the first few rows of the data
+head(col.fer.order)
+
+# Creating the volcano plot
+p1 <- ggplot(col.fer.order, aes(x = -clr, y = W)) +
+  geom_point(shape = 21, color = "red3", fill = NA, size = 1.5, stroke = 0.7) +  # Adjust size and stroke as needed
+  theme_minimal() +
+  labs(title = "Volcano Plot", x = "clr", y = "W")
+
+col.fer.class <- read.csv("col_fer_class.csv")
+col.fer.phylum <- read.csv("col_fer_phylum.csv")
+
+mergedfer <- p1 + 
+  geom_point(data = col.fer.class, aes(x = -clr, y = W), shape = 21, color = "#00a7a1", fill = NA, size = 1.5, stroke = 0.7) + 
+  geom_point(data = col.fer.phylum, aes(x = clr, y = W), shape = 21, color = "#b0a60d", fill = NA, size = 1.5, stroke = 0.7)
+mergedfer
+
+git add .
